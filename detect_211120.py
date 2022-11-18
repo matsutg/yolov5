@@ -3,21 +3,17 @@
 Run inference on images, videos, directories, streams, etc.
 
 Usage:
-    $ python path/to/detect.py --weights yolov5s.pt --source 0  # webcam
-                                                             img.jpg  # image
-                                                             vid.mp4  # video
-                                                             path/  # directory
-                                                             path/*.jpg  # glob
-                                                             'https://youtu.be/Zgi9g1ksQHc'  # YouTube
-                                                             'rtsp://example.com/media.mp4'  # RTSP, RTMP, HTTP stream
+    $ python path/to/detect.py --source path/to/img.jpg --weights yolov5s.pt --img 640
 """
 
 import argparse
 import os
+import platform
 import sys
 from pathlib import Path
 
 import cv2
+import numpy as np
 import torch
 import torch.backends.cudnn as cudnn
 
@@ -27,17 +23,16 @@ if str(ROOT) not in sys.path:
     sys.path.append(str(ROOT))  # add ROOT to PATH
 ROOT = Path(os.path.relpath(ROOT, Path.cwd()))  # relative
 
-from models.common import DetectMultiBackend
+from models.experimental import attempt_load
 from utils.datasets import IMG_FORMATS, VID_FORMATS, LoadImages, LoadStreams
-from utils.general import (LOGGER, check_file, check_img_size, check_imshow, check_requirements, colorstr,
-                           increment_path, non_max_suppression, print_args, scale_coords, strip_optimizer, xyxy2xywh)
-from utils.plots import Annotator, colors, save_one_box
-from utils.torch_utils import select_device, time_sync
-# from utils.get_feature_reaction import GetFeature  # 反応分布取得用
-import temp_x
+from utils.general import (LOGGER, apply_classifier, check_file, check_img_size, check_imshow, check_requirements,
+                           check_suffix, colorstr, increment_path, non_max_suppression, print_args, save_one_box,
+                           scale_coords, strip_optimizer, xyxy2xywh)
+from utils.plots import Annotator, colors
+from utils.torch_utils import load_classifier, select_device, time_sync
 
 
-@torch.no_grad()  # 勾配の計算をしないようにして、推論の計算処理を効率よくする
+@torch.no_grad()
 def run(weights=ROOT / 'yolov5s.pt',  # model.pt path(s)
         source=ROOT / 'data/images',  # file/dir/URL/glob, 0 for webcam
         imgsz=640,  # inference size (pixels)
@@ -63,18 +58,7 @@ def run(weights=ROOT / 'yolov5s.pt',  # model.pt path(s)
         hide_conf=False,  # hide confidences
         half=False,  # use FP16 half-precision inference
         dnn=False,  # use OpenCV DNN for ONNX inference
-
-        Euc_plot=False,
-
-        save_conv=False,
-        calc_dist=False,
-        deform=False,
-        shear=False,
-        distort=False,
-        search_min=False,
-        plot_conv=False
         ):
-    count = 0
     source = str(source)
     save_img = not nosave and not source.endswith('.txt')  # save inference images
     is_file = Path(source).suffix[1:] in (IMG_FORMATS + VID_FORMATS)
@@ -87,94 +71,132 @@ def run(weights=ROOT / 'yolov5s.pt',  # model.pt path(s)
     save_dir = increment_path(Path(project) / name, exist_ok=exist_ok)  # increment run
     (save_dir / 'labels' if save_txt else save_dir).mkdir(parents=True, exist_ok=True)  # make dir
 
-    # Load model
+    # Initialize
     device = select_device(device)
-    model = DetectMultiBackend(weights, device=device, dnn=dnn)
-    stride, names, pt, jit, onnx, engine = model.stride, model.names, model.pt, model.jit, model.onnx, model.engine
-    print(imgsz)
-    imgsz = check_img_size(imgsz, s=stride)  # check image size
+    half &= device.type != 'cpu'  # half precision only supported on CUDA
 
-    # Half
-    half &= (pt or engine) and device.type != 'cpu'  # half precision only supported by PyTorch on CUDA
+    # Load model
+    w = str(weights[0] if isinstance(weights, list) else weights)
+    classify, suffix, suffixes = False, Path(w).suffix.lower(), ['.pt', '.onnx', '.tflite', '.pb', '']
+    check_suffix(w, suffixes)  # check weights have acceptable suffix
+    pt, onnx, tflite, pb, saved_model = (suffix == x for x in suffixes)  # backend booleans
+    stride, names = 64, [f'class{i}' for i in range(1000)]  # assign defaults
     if pt:
-        model.model.half() if half else model.model.float()
+        model = torch.jit.load(w) if 'torchscript' in w else attempt_load(weights, map_location=device)
+        stride = int(model.stride.max())  # model stride
+        names = model.module.names if hasattr(model, 'module') else model.names  # get class names
+        if half:
+            model.half()  # to FP16
+        if classify:  # second-stage classifier
+            modelc = load_classifier(name='resnet50', n=2)  # initialize
+            modelc.load_state_dict(torch.load('resnet50.pt', map_location=device)['model']).to(device).eval()
+    elif onnx:
+        if dnn:
+            check_requirements(('opencv-python>=4.5.4',))
+            net = cv2.dnn.readNetFromONNX(w)
+        else:
+            check_requirements(('onnx', 'onnxruntime-gpu' if torch.has_cuda else 'onnxruntime'))
+            import onnxruntime
+            session = onnxruntime.InferenceSession(w, None)
+    else:  # TensorFlow models
+        import tensorflow as tf
+        if pb:  # https://www.tensorflow.org/guide/migrate#a_graphpb_or_graphpbtxt
+            def wrap_frozen_graph(gd, inputs, outputs):
+                x = tf.compat.v1.wrap_function(lambda: tf.compat.v1.import_graph_def(gd, name=""), [])  # wrapped import
+                return x.prune(tf.nest.map_structure(x.graph.as_graph_element, inputs),
+                               tf.nest.map_structure(x.graph.as_graph_element, outputs))
+
+            graph_def = tf.Graph().as_graph_def()
+            graph_def.ParseFromString(open(w, 'rb').read())
+            frozen_func = wrap_frozen_graph(gd=graph_def, inputs="x:0", outputs="Identity:0")
+        elif saved_model:
+            model = tf.keras.models.load_model(w)
+        elif tflite:
+            if "edgetpu" in w:  # https://www.tensorflow.org/lite/guide/python#install_tensorflow_lite_for_python
+                import tflite_runtime.interpreter as tflri
+                delegate = {'Linux': 'libedgetpu.so.1',  # install libedgetpu https://coral.ai/software/#edgetpu-runtime
+                            'Darwin': 'libedgetpu.1.dylib',
+                            'Windows': 'edgetpu.dll'}[platform.system()]
+                interpreter = tflri.Interpreter(model_path=w, experimental_delegates=[tflri.load_delegate(delegate)])
+            else:
+                interpreter = tf.lite.Interpreter(model_path=w)  # load TFLite model
+            interpreter.allocate_tensors()  # allocate
+            input_details = interpreter.get_input_details()  # inputs
+            output_details = interpreter.get_output_details()  # outputs
+            int8 = input_details[0]['dtype'] == np.uint8  # is TFLite quantized uint8 model
+    imgsz = check_img_size(imgsz, s=stride)  # check image size
 
     # Dataloader
     if webcam:
         view_img = check_imshow()
         cudnn.benchmark = True  # set True to speed up constant image size inference
-        dataset = LoadStreams(source, img_size=imgsz, stride=stride, auto=pt and not jit)
+        dataset = LoadStreams(source, img_size=imgsz, stride=stride, auto=pt)
         bs = len(dataset)  # batch_size
     else:
-        dataset = LoadImages(source, img_size=imgsz, stride=stride, auto=pt and not jit)
+        dataset = LoadImages(source, img_size=imgsz, stride=stride, auto=pt)
+        print(type(dataset))
+        exit()
         bs = 1  # batch_size
     vid_path, vid_writer = [None] * bs, [None] * bs
 
     # Run inference
     if pt and device.type != 'cpu':
-        model(torch.zeros(1, 3, *imgsz).to(device).type_as(next(model.model.parameters())))  # warmup
-
+        model(torch.zeros(1, 3, *imgsz).to(device).type_as(next(model.parameters())))  # run once
     dt, seen = [0.0, 0.0, 0.0], 0
-    data_name = "first"
-    if deform:
-        temp_x.deform_flag = True
-    elif shear:
-        temp_x.shear_flag = True
-    elif distort:
-        temp_x.distort_flag = True
-    if calc_dist:
-        temp_x.calc_flag = True
-    if plot_conv:
-        temp_x.plot_conv_flag = True
-    for path, im, im0s, vid_cap, s in dataset:
-        """
-        if data_name == "first":
-            data_name = Path(path).stem[:8]
-        if Path(path).stem[:8] != data_name:
-            break
-        """
-
+    for path, img, im0s, vid_cap, s in dataset:
         t1 = time_sync()
-        im = torch.from_numpy(im).to(device)
-        im = im.half() if half else im.float()  # uint8 to fp16/32
-        im /= 255  # 0 - 255 to 0.0 - 1.0
-        if len(im.shape) == 3:
-            im = im[None]  # expand for batch dim
+        if onnx:
+            img = img.astype('float32')
+        else:
+            img = torch.from_numpy(img).to(device)
+            img = img.half() if half else img.float()  # uint8 to fp16/32
+        img /= 255  # 0 - 255 to 0.0 - 1.0
+        if len(img.shape) == 3:
+            img = img[None]  # expand for batch dim
         t2 = time_sync()
         dt[0] += t2 - t1
 
         # Inference
-        visualize = increment_path(save_dir / Path(path).stem, mkdir=True) if visualize else False
-        pred = model(im, augment=augment, visualize=visualize)
-        """
-        print("type(pred)", type(pred))
-        print("pred.shape", pred.shape)
-        print("prediction[..., 4]", pred[..., 4])
-        print("prediction[..., 4]", pred[..., 4] > 0.25)
-        """
+        if pt:
+            visualize = increment_path(save_dir / Path(path).stem, mkdir=True) if visualize else False
+            pred = model(img, augment=augment, visualize=visualize)[0]
+        elif onnx:
+            if dnn:
+                net.setInput(img)
+                pred = torch.tensor(net.forward())
+            else:
+                pred = torch.tensor(session.run([session.get_outputs()[0].name], {session.get_inputs()[0].name: img}))
+        else:  # tensorflow model (tflite, pb, saved_model)
+            imn = img.permute(0, 2, 3, 1).cpu().numpy()  # image in numpy
+            if pb:
+                pred = frozen_func(x=tf.constant(imn)).numpy()
+            elif saved_model:
+                pred = model(imn, training=False).numpy()
+            elif tflite:
+                if int8:
+                    scale, zero_point = input_details[0]['quantization']
+                    imn = (imn / scale + zero_point).astype(np.uint8)  # de-scale
+                interpreter.set_tensor(input_details[0]['index'], imn)
+                interpreter.invoke()
+                pred = interpreter.get_tensor(output_details[0]['index'])
+                if int8:
+                    scale, zero_point = output_details[0]['quantization']
+                    pred = (pred.astype(np.float32) - zero_point) * scale  # re-scale
+            pred[..., 0] *= imgsz[1]  # x
+            pred[..., 1] *= imgsz[0]  # y
+            pred[..., 2] *= imgsz[1]  # w
+            pred[..., 3] *= imgsz[0]  # h
+            pred = torch.tensor(pred)
         t3 = time_sync()
         dt[1] += t3 - t2
-        if save_conv:
-            temp_x.flat_list()
-            temp_x.save_list(path)
-        if plot_conv:
-            temp_x.flat_list()
-            temp_x.plot_conv()
-        if calc_dist:
-            temp_x.flat_list()
-            temp_x.calc_dist(path)
 
         # NMS
         pred = non_max_suppression(pred, conf_thres, iou_thres, classes, agnostic_nms, max_det=max_det)
-        """
-        print("type(pred)", type(pred))
-        print("len(pred)", len(pred))
-        print("pred", pred)
-        """
         dt[2] += time_sync() - t3
 
         # Second-stage classifier (optional)
-        # pred = utils.general.apply_classifier(pred, classifier_model, im, im0s)
+        if classify:
+            pred = apply_classifier(pred, modelc, img, im0s)
 
         # Process predictions
         for i, det in enumerate(pred):  # per image
@@ -186,15 +208,15 @@ def run(weights=ROOT / 'yolov5s.pt',  # model.pt path(s)
                 p, im0, frame = path, im0s.copy(), getattr(dataset, 'frame', 0)
 
             p = Path(p)  # to Path
-            save_path = str(save_dir / p.name)  # im.jpg
-            txt_path = str(save_dir / 'labels' / p.stem) + ('' if dataset.mode == 'image' else f'_{frame}')  # im.txt
-            s += '%gx%g ' % im.shape[2:]  # print string
+            save_path = str(save_dir / p.name)  # img.jpg
+            txt_path = str(save_dir / 'labels' / p.stem) + ('' if dataset.mode == 'image' else f'_{frame}')  # img.txt
+            s += '%gx%g ' % img.shape[2:]  # print string
             gn = torch.tensor(im0.shape)[[1, 0, 1, 0]]  # normalization gain whwh
             imc = im0.copy() if save_crop else im0  # for save_crop
             annotator = Annotator(im0, line_width=line_thickness, example=str(names))
             if len(det):
                 # Rescale boxes from img_size to im0 size
-                det[:, :4] = scale_coords(im.shape[2:], det[:, :4], im0.shape).round()
+                det[:, :4] = scale_coords(img.shape[2:], det[:, :4], im0.shape).round()
 
                 # Print results
                 for c in det[:, -1].unique():
@@ -214,13 +236,7 @@ def run(weights=ROOT / 'yolov5s.pt',  # model.pt path(s)
                         label = None if hide_labels else (names[c] if hide_conf else f'{names[c]} {conf:.2f}')
                         annotator.box_label(xyxy, label, color=colors(c, True))
                         if save_crop:
-                            count += 1
-                            """
-                            if count % 2 == 0:
-                                break
-                            """
-                            save_one_box(xyxy, imc, file=save_dir / 'crops' / names[c] / f'{count}_{p.stem}_{conf}.jpg',
-                                         BGR=True)
+                            save_one_box(xyxy, imc, file=save_dir / 'crops' / names[c] / f'{p.stem}.jpg', BGR=True)
 
             # Print time (inference-only)
             LOGGER.info(f'{s}Done. ({t3 - t2:.3f}s)')
@@ -259,11 +275,6 @@ def run(weights=ROOT / 'yolov5s.pt',  # model.pt path(s)
     if update:
         strip_optimizer(weights)  # update model (to fix SourceChangeWarning)
 
-    if Euc_plot:  # plot するかどうか
-        temp_x.plot_graph()
-    if search_min:
-        temp_x.search_min_data_file()
-
 
 def parse_opt():
     parser = argparse.ArgumentParser()
@@ -292,12 +303,6 @@ def parse_opt():
     parser.add_argument('--hide-conf', default=False, action='store_true', help='hide confidences')
     parser.add_argument('--half', action='store_true', help='use FP16 half-precision inference')
     parser.add_argument('--dnn', action='store_true', help='use OpenCV DNN for ONNX inference')
-
-    parser.add_argument('--Euc-plot', action='store_true', help='plot graph')
-    parser.add_argument('--save-conv', action='store_true', help='flat and save conv')
-    parser.add_argument('--calc-dist', action='store_true', help='flat and calc dist between conv')
-    parser.add_argument('--deform', action='store_true', help='deform data')
-    parser.add_argument('--search-min', action='store_true', help='search min data')
     opt = parser.parse_args()
     opt.imgsz *= 2 if len(opt.imgsz) == 1 else 1  # expand
     print_args(FILE.stem, opt)

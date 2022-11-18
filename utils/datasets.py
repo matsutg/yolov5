@@ -25,10 +25,11 @@ from PIL import ExifTags, Image, ImageOps
 from torch.utils.data import DataLoader, Dataset, dataloader, distributed
 from tqdm import tqdm
 
-from utils.augmentations import Albumentations, augment_hsv, copy_paste, letterbox, mixup, random_perspective
+from utils.augmentations import Albumentations, augment_hsv, copy_paste, letterbox, mixup, random_perspective, loadimg_to_squre
 from utils.general import (LOGGER, check_dataset, check_requirements, check_yaml, clean_str, segments2boxes, xyn2xy,
                            xywh2xyxy, xywhn2xyxy, xyxy2xywhn)
 from utils.torch_utils import torch_distributed_zero_first
+import temp_x
 
 # Parameters
 HELP_URL = 'https://github.com/ultralytics/yolov5/wiki/Train-Custom-Data'
@@ -221,7 +222,20 @@ class LoadImages:
             s = f'image {self.count}/{self.nf} {path}: '
 
         # Padded resize
-        img = letterbox(img0, self.img_size, stride=self.stride, auto=self.auto)[0]
+        img = letterbox(img0, self.img_size, stride=self.stride, auto=self.auto, calc_flag=temp_x.calc_flag)[0]
+
+        if temp_x.deform_flag:
+            img = temp_x.wrap_perspective(img)
+        elif temp_x.shear_flag:
+            img = temp_x.shear(img)
+        elif temp_x.distort_flag:
+            img = temp_x.distort(img)
+
+        # img = loadimg_to_squre(img0, self.img_size, stride=self.stride, auto=self.auto)[0]
+        # cv2.imshow('color', img) #  パディング済み画像の表示
+        # print(img.shape) #  そのサイズ確認
+
+        # cv2.imwrite("C:/Users/kikuchilab/PycharmProjects/yolo5/test/2H6A9795.jpg", img) パディング画像の保存
 
         # Convert
         img = img.transpose((2, 0, 1))[::-1]  # HWC to CHW, BGR to RGB

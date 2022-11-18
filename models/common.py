@@ -19,7 +19,7 @@ import torch
 import torch.nn as nn
 from PIL import Image
 from torch.cuda import amp
-
+import matplotlib.pyplot as plt
 from utils.datasets import exif_transpose, letterbox
 from utils.general import (LOGGER, check_requirements, check_suffix, colorstr, increment_path, make_divisible,
                            non_max_suppression, scale_coords, xywh2xyxy, xyxy2xywh)
@@ -136,7 +136,6 @@ class C3(nn.Module):
 
     def forward(self, x):
         return self.cv3(torch.cat((self.m(self.cv1(x)), self.cv2(x)), dim=1))
-
 
 class C3TR(C3):
     # C3 module with TransformerBlock()
@@ -304,7 +303,9 @@ class DetectMultiBackend(nn.Module):
                 stride, names = int(d['stride']), d['names']
         elif pt:  # PyTorch
             from models.experimental import attempt_load  # scoped to avoid circular import
+            # ここで学習済み重みのロード、最初のスケールを
             model = torch.jit.load(w) if 'torchscript' in w else attempt_load(weights, map_location=device)
+            #print(model) モデルの中身が見れます
             stride = int(model.stride.max())  # model stride
             names = model.module.names if hasattr(model, 'module') else model.names  # get class names
         elif coreml:  # CoreML *.mlmodel
