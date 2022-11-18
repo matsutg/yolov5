@@ -85,7 +85,7 @@ def run(weights=ROOT / 'yolov5s.pt',  # model path or triton URL
         shear=False,
         distort=False,
         search_min=False,
-        plot_conv=False
+        plot_conv=False,
         vid_stride=1  # video frame-rate stride
         ):
     count = 0
@@ -221,13 +221,12 @@ def run(weights=ROOT / 'yolov5s.pt',  # model path or triton URL
                         label = None if hide_labels else (names[c] if hide_conf else f'{names[c]} {conf:.2f}')
                         annotator.box_label(xyxy, label, color=colors(c, True))
                     if save_crop:
-                            count += 1
-                            """
-                            if count % 2 == 0:
-                                break
-                            """
-                        save_one_box(xyxy, imc, file=save_dir / 'crops' / names[c] / f'{count}_{p.stem}_{conf}.jpg',
-                                         BGR=True)
+                        count += 1
+                        """
+                        if count % 2 == 0:
+                        break
+                        """
+                        save_one_box(xyxy, imc, file=save_dir / 'crops' / names[c] / f'{count}_{p.stem}_{conf}.jpg', BGR=True)
 
             # Stream results
             im0 = annotator.result()
