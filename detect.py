@@ -50,8 +50,7 @@ import temp_x
 
 
 @smart_inference_mode()  # 勾配の計算をしないようにして、推論の計算処理を効率よくする
-def run(
-        weights=ROOT / 'yolov5s.pt',  # model path or triton URL
+def run(weights=ROOT / 'yolov5s.pt',  # model path or triton URL
         source=ROOT / 'data/images',  # file/dir/URL/glob/screen/0(webcam)
         data=ROOT / 'data/coco128.yaml',  # dataset.yaml path
         imgsz=(640, 640),  # inference size (height, width)
@@ -87,8 +86,8 @@ def run(
         distort=False,
         search_min=False,
         plot_conv=False
-        vid_stride=1,  # video frame-rate stride
-):
+        vid_stride=1  # video frame-rate stride
+        ):
     count = 0
     source = str(source)
     save_img = not nosave and not source.endswith('.txt')  # save inference images
