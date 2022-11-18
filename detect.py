@@ -33,9 +33,11 @@ from utils.general import (LOGGER, check_file, check_img_size, check_imshow, che
                            increment_path, non_max_suppression, print_args, scale_coords, strip_optimizer, xyxy2xywh)
 from utils.plots import Annotator, colors, save_one_box
 from utils.torch_utils import select_device, time_sync
+# from utils.get_feature_reaction import GetFeature  # 反応分布取得用
+import temp_x
 
 
-@torch.no_grad()
+@torch.no_grad()  # 勾配の計算をしないようにして、推論の計算処理を効率よくする
 def run(weights=ROOT / 'yolov5s.pt',  # model.pt path(s)
         source=ROOT / 'data/images',  # file/dir/URL/glob, 0 for webcam
         imgsz=640,  # inference size (pixels)
@@ -61,7 +63,18 @@ def run(weights=ROOT / 'yolov5s.pt',  # model.pt path(s)
         hide_conf=False,  # hide confidences
         half=False,  # use FP16 half-precision inference
         dnn=False,  # use OpenCV DNN for ONNX inference
+
+        Euc_plot=False,
+
+        save_conv=False,
+        calc_dist=False,
+        deform=False,
+        shear=False,
+        distort=False,
+        search_min=False,
+        plot_conv=False
         ):
+    count = 0
     source = str(source)
     save_img = not nosave and not source.endswith('.txt')  # save inference images
     is_file = Path(source).suffix[1:] in (IMG_FORMATS + VID_FORMATS)
@@ -78,6 +91,7 @@ def run(weights=ROOT / 'yolov5s.pt',  # model.pt path(s)
     device = select_device(device)
     model = DetectMultiBackend(weights, device=device, dnn=dnn)
     stride, names, pt, jit, onnx, engine = model.stride, model.names, model.pt, model.jit, model.onnx, model.engine
+    print(imgsz)
     imgsz = check_img_size(imgsz, s=stride)  # check image size
 
     # Half
@@ -99,8 +113,27 @@ def run(weights=ROOT / 'yolov5s.pt',  # model.pt path(s)
     # Run inference
     if pt and device.type != 'cpu':
         model(torch.zeros(1, 3, *imgsz).to(device).type_as(next(model.model.parameters())))  # warmup
+
     dt, seen = [0.0, 0.0, 0.0], 0
+    data_name = "first"
+    if deform:
+        temp_x.deform_flag = True
+    elif shear:
+        temp_x.shear_flag = True
+    elif distort:
+        temp_x.distort_flag = True
+    if calc_dist:
+        temp_x.calc_flag = True
+    if plot_conv:
+        temp_x.plot_conv_flag = True
     for path, im, im0s, vid_cap, s in dataset:
+        """
+        if data_name == "first":
+            data_name = Path(path).stem[:8]
+        if Path(path).stem[:8] != data_name:
+            break
+        """
+
         t1 = time_sync()
         im = torch.from_numpy(im).to(device)
         im = im.half() if half else im.float()  # uint8 to fp16/32
@@ -113,11 +146,31 @@ def run(weights=ROOT / 'yolov5s.pt',  # model.pt path(s)
         # Inference
         visualize = increment_path(save_dir / Path(path).stem, mkdir=True) if visualize else False
         pred = model(im, augment=augment, visualize=visualize)
+        """
+        print("type(pred)", type(pred))
+        print("pred.shape", pred.shape)
+        print("prediction[..., 4]", pred[..., 4])
+        print("prediction[..., 4]", pred[..., 4] > 0.25)
+        """
         t3 = time_sync()
         dt[1] += t3 - t2
+        if save_conv:
+            temp_x.flat_list()
+            temp_x.save_list(path)
+        if plot_conv:
+            temp_x.flat_list()
+            temp_x.plot_conv()
+        if calc_dist:
+            temp_x.flat_list()
+            temp_x.calc_dist(path)
 
         # NMS
         pred = non_max_suppression(pred, conf_thres, iou_thres, classes, agnostic_nms, max_det=max_det)
+        """
+        print("type(pred)", type(pred))
+        print("len(pred)", len(pred))
+        print("pred", pred)
+        """
         dt[2] += time_sync() - t3
 
         # Second-stage classifier (optional)
@@ -161,7 +214,13 @@ def run(weights=ROOT / 'yolov5s.pt',  # model.pt path(s)
                         label = None if hide_labels else (names[c] if hide_conf else f'{names[c]} {conf:.2f}')
                         annotator.box_label(xyxy, label, color=colors(c, True))
                         if save_crop:
-                            save_one_box(xyxy, imc, file=save_dir / 'crops' / names[c] / f'{p.stem}.jpg', BGR=True)
+                            count += 1
+                            """
+                            if count % 2 == 0:
+                                break
+                            """
+                            save_one_box(xyxy, imc, file=save_dir / 'crops' / names[c] / f'{count}_{p.stem}_{conf}.jpg',
+                                         BGR=True)
 
             # Print time (inference-only)
             LOGGER.info(f'{s}Done. ({t3 - t2:.3f}s)')
@@ -200,6 +259,11 @@ def run(weights=ROOT / 'yolov5s.pt',  # model.pt path(s)
     if update:
         strip_optimizer(weights)  # update model (to fix SourceChangeWarning)
 
+    if Euc_plot:  # plot するかどうか
+        temp_x.plot_graph()
+    if search_min:
+        temp_x.search_min_data_file()
+
 
 def parse_opt():
     parser = argparse.ArgumentParser()
@@ -228,6 +292,12 @@ def parse_opt():
     parser.add_argument('--hide-conf', default=False, action='store_true', help='hide confidences')
     parser.add_argument('--half', action='store_true', help='use FP16 half-precision inference')
     parser.add_argument('--dnn', action='store_true', help='use OpenCV DNN for ONNX inference')
+
+    parser.add_argument('--Euc-plot', action='store_true', help='plot graph')
+    parser.add_argument('--save-conv', action='store_true', help='flat and save conv')
+    parser.add_argument('--calc-dist', action='store_true', help='flat and calc dist between conv')
+    parser.add_argument('--deform', action='store_true', help='deform data')
+    parser.add_argument('--search-min', action='store_true', help='search min data')
     opt = parser.parse_args()
     opt.imgsz *= 2 if len(opt.imgsz) == 1 else 1  # expand
     print_args(FILE.stem, opt)

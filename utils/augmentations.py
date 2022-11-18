@@ -88,21 +88,21 @@ def replicate(im, labels):
     return im, labels
 
 
-def letterbox(im, new_shape=(640, 640), color=(114, 114, 114), auto=True, scaleFill=False, scaleup=True, stride=32):
+def letterbox(im, new_shape=(640, 640), color=(114, 114, 114), auto=True, scaleFill=False, scaleup=True, stride=32, calc_flag = False):
     # Resize and pad image while meeting stride-multiple constraints
-    shape = im.shape[:2]  # current shape [height, width]
+    shape = im.shape[:2]  # current shape [height, width] ex.(256, 186)
     if isinstance(new_shape, int):
         new_shape = (new_shape, new_shape)
 
     # Scale ratio (new / old)
-    r = min(new_shape[0] / shape[0], new_shape[1] / shape[1])
+    r = min(new_shape[0] / shape[0], new_shape[1] / shape[1])  # min(128/256, 128/186)
     if not scaleup:  # only scale down, do not scale up (for better val mAP)
         r = min(r, 1.0)
 
     # Compute padding
     ratio = r, r  # width, height ratios
-    new_unpad = int(round(shape[1] * r)), int(round(shape[0] * r))
-    dw, dh = new_shape[1] - new_unpad[0], new_shape[0] - new_unpad[1]  # wh padding
+    new_unpad = int(round(shape[1] * r)), int(round(shape[0] * r))  # スケールを長短im.shapeにする
+    dw, dh = new_shape[1] - new_unpad[0], new_shape[0] - new_unpad[1]  # パディングするw,hの余白を求める
     if auto:  # minimum rectangle
         dw, dh = np.mod(dw, stride), np.mod(dh, stride)  # wh padding
     elif scaleFill:  # stretch
@@ -118,6 +118,66 @@ def letterbox(im, new_shape=(640, 640), color=(114, 114, 114), auto=True, scaleF
     top, bottom = int(round(dh - 0.1)), int(round(dh + 0.1))
     left, right = int(round(dw - 0.1)), int(round(dw + 0.1))
     im = cv2.copyMakeBorder(im, top, bottom, left, right, cv2.BORDER_CONSTANT, value=color)  # add border
+
+    if calc_flag:
+        dh2, dh2t, dw2, dw2r= 0, 0, 0, 0
+        if new_shape[0]-im.shape[0] != 0:
+            dh2 = new_shape[0]-im.shape[0]
+            dh2 /= 2
+            if isinstance(dh2, float):
+                dh2t = int(dh2)+1
+            im = cv2.copyMakeBorder(im, dh2t, int(dh2), 0, 0, cv2.BORDER_CONSTANT, value=color)  # add border
+        if new_shape[1]-im.shape[1] != 0:
+            dw2 = new_shape[1]-im.shape[1]
+            dw2 /= 2
+            if isinstance(dw2, float):
+                dw2r = int(dw2)+1
+            im = cv2.copyMakeBorder(im, 0, 0, int(dw2), dw2r, cv2.BORDER_CONSTANT, value=color)  # add border
+
+    return im, ratio, (dw, dh)
+
+
+def loadimg_to_squre(im, new_shape=(640, 640), color=(114, 114, 114), auto=True, scaleFill=False, scaleup=True, stride=32):
+    height, width = im.shape[:2]  # 画像の縦横サイズを取得
+    # Resize and pad image while meeting stride-multiple constraints
+    shape = im.shape[:2]  # current shape [height, width] ex.(256, 186)
+    if isinstance(new_shape, int):
+        new_shape = (new_shape, new_shape)
+
+    # Scale ratio (new / old)
+    r = min(new_shape[0] / height, new_shape[1] / width)  # min(128/256, 128/186)
+    if not scaleup:  # only scale down, do not scale up (for better val mAP)
+        r = min(r, 1.0)
+
+    # Compute padding
+    ratio = r, r  # width, height ratios
+    new_unpad = int(round(width * r)), int(round(height * r))  # スケールを長短im.shapeにする
+    dw, dh = new_shape[1] - new_unpad[0], new_shape[0] - new_unpad[1]  # パディングするw,hの余白を求める
+    if auto:  # minimum rectangle
+        dw, dh = np.mod(dw, stride), np.mod(dh, stride)  # wh padding
+    elif scaleFill:  # stretch
+        dw, dh = 0.0, 0.0
+        new_unpad = (new_shape[1], new_shape[0])
+        ratio = new_shape[1] / width, new_shape[0] / height  # width, height ratios
+
+    dw /= 2  # divide padding into 2 sides
+    dh /= 2
+
+    # 縦長画像→幅を拡張する
+    if height > width:
+        diffsize = height - width
+        # 元画像を中央ぞろえにしたいので、左右に均等に余白を入れる
+        padding_half = int(diffsize / 2)
+        padding_img = cv2.copyMakeBorder(im, 0, 0, padding_half, padding_half, cv2.BORDER_CONSTANT, value=color)
+
+    # 横長画像→高さを拡張する
+    elif width > height:
+        diffsize = width - height
+        padding_half = int(diffsize / 2)
+        padding_img = cv2.copyMakeBorder(im, padding_half, padding_half, 0, 0, cv2.BORDER_CONSTANT, value=color)
+
+    im = cv2.resize(padding_img, new_shape, interpolation=cv2.INTER_LINEAR)
+
     return im, ratio, (dw, dh)
 
 
@@ -141,7 +201,7 @@ def random_perspective(im, targets=(), segments=(), degrees=10, translate=.1, sc
 
     # Rotation and Scale
     R = np.eye(3)
-    a = random.uniform(-degrees, degrees)
+    a = random.uniform(-degrees, degrees) # 小さな回転
     # a += random.choice([-180, -90, 0, 90])  # add 90deg rotations to small rotations
     s = random.uniform(1 - scale, 1 + scale)
     # s = 2 ** random.uniform(-scale, scale)
